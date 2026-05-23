@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+
+# Logs
+*.log
+
+# Local data files (덤프·CSV·ingest raw 등)
+*.dump
+*.csv
+data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Pytest / mypy caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docker artifacts (혹시 back/ 안에 만들 경우)
+*.tar.gz

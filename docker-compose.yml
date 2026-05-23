@@ -1,0 +1,31 @@
+# DB 비밀번호 등은 .env 에 두고, 이 파일은 Git 에 올림. .env 는 .gitignore.
+# - 로컬 개발: `docker compose up --build` (소스에서 빌드해서 image 태깅)
+# - EC2 운영: Mac에서 `docker save szsh-api:latest | gzip > ...` → scp → EC2에서 `docker load`
+#             그러면 image 가 EC2 docker daemon 에 들어가 있고, 그 상태에서 `docker compose up -d` 하면 build 안 하고 그 image 그대로 씀.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"   # 외부 노출 X, 호스트 내부에서만 접근 (운영 보안)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: szsh-api:latest      # build 결과물에 부여할 태그. EC2 에서는 docker load 로 들어온 동일 태그 사용.
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - db
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

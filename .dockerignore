@@ -1,0 +1,17 @@
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.log
+.git
+.gitignore
+.venv
+venv/
+data/
+*.dump
+*.csv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+README.md
