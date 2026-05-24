@@ -283,6 +283,23 @@ def get_current_user(
     return user
 
 
+def get_current_user_optional(
+    authorization: str | None = Header(default=None),
+    access_cookie: str | None = Cookie(default=None, alias=ACCESS_COOKIE),
+    db: Session = Depends(get_db),
+) -> User | None:
+    token: str | None = access_cookie
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+    if not token:
+        return None
+    try:
+        payload = _decode_access_token(token)
+    except HTTPException:
+        return None
+    return db.query(User).filter(User.id == int(payload["sub"])).first()
+
+
 # ── 라우트 ──────────────────────────────────────────────────────
 
 
@@ -355,9 +372,10 @@ def oauth_callback(
     return response
 
 
-@router.get("/me", response_model=UserOut)
-def me(current: User = Depends(get_current_user)):
-    return UserOut.model_validate(current)
+@router.get("/me", response_model=UserOut | None)
+def me(current: User | None = Depends(get_current_user_optional)):
+    # 비로그인 시 401 대신 200 + null 반환 — 콘솔에 가짜 에러가 안 뜨도록.
+    return UserOut.model_validate(current) if current else None
 
 
 @router.post("/refresh")

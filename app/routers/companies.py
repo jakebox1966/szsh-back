@@ -175,12 +175,12 @@ def get_company(slug: str, db: Session = Depends(get_db)):
         fl = list(company.finance)
         f = fl[0] if fl else None
         if f:
-            history = [
-                {"year": fh.year, "rev": float(fh.rev), "profit": float(fh.profit)}
-                for fh in (company.finance_history or [])
-            ]
             def _n(v):
                 return float(v) if v is not None else None
+            history = [
+                {"year": fh.year, "rev": _n(fh.rev), "profit": _n(fh.profit)}
+                for fh in sorted(company.finance_history or [], key=lambda x: x.year or "")
+            ]
             finance_out = FinanceOut(
                 revenue={"current": _n(f.revenue_current), "growth": _n(f.revenue_growth)},
                 operatingProfit={"current": _n(f.operating_profit_current), "growth": _n(f.operating_profit_growth)},
