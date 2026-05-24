@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_domain: str | None = None          # 운영: ".szsh.kr" 같이 부모 도메인. 로컬: None.
 
+    # BFF 내부 API 키. Next.js 서버만 알고 X-Internal-Key 헤더로 전달.
+    # 빈 문자열이면 검증 통과 (점진 배포: 프론트 BFF 적용 전까지 호환성 유지).
+    internal_api_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=_env_path,
         env_ignore_extra=True,
