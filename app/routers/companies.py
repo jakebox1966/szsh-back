@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
 from app.industry_groups import classify_industry
@@ -68,15 +68,18 @@ def search_companies(q: str = Query("", description="Search keyword"), db: Sessi
 
 @router.get("/{slug}", response_model=CompanyDetailOut)
 def get_company(slug: str, db: Session = Depends(get_db)):
+    # selectinload: 각 관계를 별도 IN 쿼리로 분리해서 join row 폭발 방지.
+    # 1:1 (summary, hr) 도 selectinload 가 동일 성능이라 통일 — 댓글이 늘어도
+    # finance_history × hr_trends × comments 카테시안 곱 위험 없음.
     company = (
         db.query(Company)
         .options(
-            joinedload(Company.summary),
-            joinedload(Company.comments),
-            joinedload(Company.hr),
-            joinedload(Company.hr_trends),
-            joinedload(Company.finance),
-            joinedload(Company.finance_history),
+            selectinload(Company.summary),
+            selectinload(Company.comments),
+            selectinload(Company.hr),
+            selectinload(Company.hr_trends),
+            selectinload(Company.finance),
+            selectinload(Company.finance_history),
         )
         .filter(Company.slug == slug)
         .first()

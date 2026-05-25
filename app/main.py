@@ -44,6 +44,21 @@ async def internal_key_guard(request: Request, call_next):
     return await call_next(request)
 
 
+# ── 응답 캐시 헤더 ────────────────────────────────────────────────
+# 홈 위젯 데이터는 매일 1회 정도만 갱신되므로 CDN(Vercel) 이 적극 캐싱하도록
+# Cache-Control 부여. 사용자별로 안 변하는 데이터에만 적용.
+_CACHEABLE_PREFIXES = ("/api/home/",)
+_CACHE_HEADER = "public, s-maxage=3600, stale-while-revalidate=86400"
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and request.url.path.startswith(_CACHEABLE_PREFIXES):
+        response.headers.setdefault("Cache-Control", _CACHE_HEADER)
+    return response
+
+
 app.include_router(home.router)
 app.include_router(spotlight.router)
 app.include_router(companies.router)
