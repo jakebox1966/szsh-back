@@ -1,7 +1,16 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# ingest 단계에서 사업자등록번호 누락 시 industry 컬럼에 박힌 placeholder.
+# 사용자 화면에는 노출하지 않음 (DB 값은 ingest meta 보존 위해 그대로 둠).
+_INDUSTRY_PLACEHOLDERS = {"BIZ_NO미존재사업장"}
+
+
+def _clean_industry(v: Optional[str]) -> Optional[str]:
+    return None if v in _INDUSTRY_PLACEHOLDERS else v
 
 
 # --- Home ---
@@ -30,6 +39,8 @@ class CompanyListItem(BaseModel):
     logo: Optional[str] = None
     industry: Optional[str] = None
     isListed: Optional[bool] = Field(None, validation_alias="is_listed")
+
+    _clean_industry = field_validator("industry", mode="before")(_clean_industry)
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 
@@ -97,16 +108,24 @@ class FinanceOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class IndustryGroupOut(BaseModel):
+    key: str        # URL 필터링용 식별자 (예: "it")
+    label: str      # 표시 라벨 (예: "IT·플랫폼")
+
+
 class CompanyInfoOut(BaseModel):
     name: str
     engName: Optional[str] = None
     logo: Optional[str] = None
     industry: Optional[str] = None
+    industryGroup: Optional[IndustryGroupOut] = None   # 상위 분야 분류
     history: Optional[str] = None
     address: Optional[str] = None
     website: Optional[str] = None
     tags: list[str] = []
     isListed: Optional[bool] = Field(None, validation_alias="is_listed")
+
+    _clean_industry = field_validator("industry", mode="before")(_clean_industry)
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 
@@ -133,6 +152,8 @@ class CompanyOfDayOut(BaseModel):
     operatingMargin: Optional[float] = None      # %, 영업이익률
     revenuePerEmployee: Optional[int] = None     # 원, 1인당 생산성
 
+    _clean_industry = field_validator("industry", mode="before")(_clean_industry)
+
 
 # --- Industry Compare (분야 내 회사 비교 카드) ---
 
@@ -149,6 +170,8 @@ class CompareCompany(BaseModel):
     name: str
     industry: Optional[str] = None
     history: list[CompareHistoryItem] = []
+
+    _clean_industry = field_validator("industry", mode="before")(_clean_industry)
 
 
 class IndustryCompareOut(BaseModel):
@@ -172,6 +195,8 @@ class SpotlightItem(BaseModel):
     operatingProfit: Optional[int] = None # 원
     revenueGrowth: Optional[float] = None # %
     employeeGrowth: Optional[float] = None # %, metric=growth 일 때
+
+    _clean_industry = field_validator("industry", mode="before")(_clean_industry)
 
     model_config = {"from_attributes": True}
 

@@ -5,10 +5,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.industry_groups import classify_industry
 from app.models import Company, CompanyComment, User
 from app.routers.auth import get_current_user
 from app.schemas import (
-    CompanyListItem, CompanyDetailOut, CompanyInfoOut, SummaryOut,
+    CompanyListItem, CompanyDetailOut, CompanyInfoOut, IndustryGroupOut, SummaryOut,
     CommentOut, CommentCreate, CommentUpdate, HROut, HRTrendOut, FinanceOut,
 )
 
@@ -83,11 +84,13 @@ def get_company(slug: str, db: Session = Depends(get_db)):
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    group = classify_industry(company.industry)
     info = CompanyInfoOut(
         name=company.name,
         engName=company.eng_name,
         logo=company.logo,
         industry=company.industry,
+        industryGroup=IndustryGroupOut(key=group.key, label=group.label) if group else None,
         history=_format_history(company.founded_year),
         address=company.address,
         website=company.website,

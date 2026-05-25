@@ -109,3 +109,13 @@ def industry_matches_group(industry_name: str | None, group: IndustryGroup) -> b
     if any(ex in industry_name for ex in group.exclude):
         return False
     return any(inc in industry_name for inc in group.include)
+
+
+def classify_industry(industry_name: str | None) -> IndustryGroup | None:
+    """industry 한국어 텍스트 → 매칭되는 IndustryGroup. 어느 그룹에도 안 맞으면 None."""
+    if not industry_name:
+        return None
+    for g in INDUSTRY_GROUPS:
+        if industry_matches_group(industry_name, g):
+            return g
+    return None
