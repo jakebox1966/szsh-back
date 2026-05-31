@@ -343,7 +343,8 @@ def oauth_callback(
     )
 
     now = datetime.utcnow()
-    if user is None:
+    is_new_user = user is None
+    if is_new_user:
         user = User(
             provider=provider,
             provider_user_id=info["provider_user_id"],
@@ -365,7 +366,10 @@ def oauth_callback(
     user.refresh_token_hash = _hash_refresh(refresh)
     db.commit()
 
-    redirect_to = settings.frontend_url.rstrip("/") + _safe_next(next_cookie)
+    # 프론트 GA 트래킹용 쿼리 파라미터 부착. 프론트가 읽고 sign_up/login 이벤트 발사 후 URL 정리.
+    base = settings.frontend_url.rstrip("/") + _safe_next(next_cookie)
+    sep = "&" if "?" in base else "?"
+    redirect_to = f"{base}{sep}login={provider}" + ("&new=1" if is_new_user else "")
     response = RedirectResponse(redirect_to, status_code=302)
     _set_auth_cookies(response, access, refresh)
     _clear_oauth_state_cookies(response)
