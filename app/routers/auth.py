@@ -28,6 +28,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.nickname import generate_nickname
+from app.public_id import generate_public_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -43,7 +44,7 @@ OAUTH_NEXT_COOKIE = "szsh_oauth_next"
 
 
 class UserOut(BaseModel):
-    id: int
+    public_id: str
     nickname: str
     email: str | None
     profile_image: str | None
@@ -351,6 +352,7 @@ def oauth_callback(
             email=info.get("email"),
             profile_image=info.get("profile_image"),
             nickname=generate_nickname(db),
+            public_id=generate_public_id(db),
             created_at=now,
             last_active_at=now,
         )
@@ -367,9 +369,13 @@ def oauth_callback(
     db.commit()
 
     # 프론트 GA 트래킹용 쿼리 파라미터 부착. 프론트가 읽고 sign_up/login 이벤트 발사 후 URL 정리.
+    # uid(public_id)는 GA4 user_id 로 세팅 — 추측 불가한 nanoid 라 노출돼도 안전.
     base = settings.frontend_url.rstrip("/") + _safe_next(next_cookie)
     sep = "&" if "?" in base else "?"
-    redirect_to = f"{base}{sep}login={provider}" + ("&new=1" if is_new_user else "")
+    redirect_to = (
+        f"{base}{sep}login={provider}&uid={user.public_id}"
+        + ("&new=1" if is_new_user else "")
+    )
     response = RedirectResponse(redirect_to, status_code=302)
     _set_auth_cookies(response, access, refresh)
     _clear_oauth_state_cookies(response)

@@ -208,7 +208,7 @@ def _comment_out(c: CompanyComment) -> CommentOut:
     return CommentOut(
         id=c.id,
         user=c.user.nickname if c.user else "(탈퇴)",
-        user_id=c.user_id,
+        user_public_id=c.user.public_id if c.user else "",
         content=c.content,
         time=_format_time(c.updated_at or c.created_at),
         edited=c.updated_at is not None,

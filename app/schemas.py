@@ -59,7 +59,7 @@ class SummaryOut(BaseModel):
 class CommentOut(BaseModel):
     id: int
     user: str
-    user_id: int = Field(serialization_alias="userId")
+    user_public_id: str = Field(serialization_alias="userPublicId")
     content: str
     time: str
     edited: bool = False

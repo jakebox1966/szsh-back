@@ -25,6 +25,8 @@ class User(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    # 외부 노출용 식별자 (nanoid 12자). 내부 PK(id)는 노출하지 않고 이 값만 API/URL 에 사용.
+    public_id = Column(String(12), unique=True, nullable=False, index=True)
     nickname = Column(String, unique=True, nullable=False, index=True)
 
     # 소셜 인증
