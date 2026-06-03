@@ -350,3 +350,20 @@ class EmployeeGrowth(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
 
     company = relationship("Company")
+
+
+# ── 최신 검색어 (글로벌, 전체 사용자) ──────────────────────────────
+
+
+class SearchTerm(Base):
+    """전체 사용자 검색어. 최신순 노출용 — keyword 단위 upsert.
+
+    search_count 도 함께 올려, 추후 인기/급상승(B)으로 확장 시 재사용 가능.
+    """
+    __tablename__ = "search_terms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    keyword = Column(String, unique=True, nullable=False, index=True)
+    search_count = Column(Integer, default=1, nullable=False)
+    last_searched_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
