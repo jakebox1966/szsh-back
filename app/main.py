@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import home, companies, auth, spotlight
+from app.routers import home, companies, auth, spotlight, comments
 
 app = FastAPI(title="SZSH API", version="1.0.0")
 
@@ -62,6 +62,7 @@ async def cache_headers(request: Request, call_next):
 app.include_router(home.router)
 app.include_router(spotlight.router)
 app.include_router(companies.router)
+app.include_router(comments.router)
 app.include_router(auth.router)
 
 

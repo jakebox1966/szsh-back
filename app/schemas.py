@@ -75,6 +75,39 @@ class CommentUpdate(BaseModel):
     content: str
 
 
+# ── 코멘트 모아보기 (전체 피드 + 홈 다이제스트) ──────────────────
+
+
+class CommentFeedItem(BaseModel):
+    id: int
+    company_name: str = Field(serialization_alias="companyName")
+    company_slug: str = Field(serialization_alias="companySlug")
+    nickname: str
+    content: str
+    created_at: datetime = Field(serialization_alias="createdAt")
+
+    model_config = {"populate_by_name": True}
+
+
+class CommentDigestOut(BaseModel):
+    """홈 카드용 — 비로그인 1개 / 로그인 최대 5개 (full) + 전체 개수."""
+    items: list[CommentFeedItem]
+    total_count: int = Field(serialization_alias="totalCount")
+
+    model_config = {"populate_by_name": True}
+
+
+class CommentFeedOut(BaseModel):
+    """/comments 페이지용. 비로그인은 items 에 1개만, locked=True."""
+    items: list[CommentFeedItem]
+    total_count: int = Field(serialization_alias="totalCount")
+    has_more: bool = Field(serialization_alias="hasMore")
+    locked: bool                                       # 비로그인 = True (1개만 공개)
+    next_cursor: Optional[int] = Field(default=None, serialization_alias="nextCursor")
+
+    model_config = {"populate_by_name": True}
+
+
 class HRTrendOut(BaseModel):
     month: str                                                  # "YYYY-MM" 형식
     in_count: int = Field(serialization_alias="in")
