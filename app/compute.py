@@ -239,7 +239,8 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
             if gk:
                 group_key_to_members.setdefault(gk, []).append(n)
 
-        # DART 매핑: group_key → (eng_name, website, dart_id, corp_cls, stock_name)
+        # DART 매핑: group_key → (eng_name, website, dart_id, corp_cls, stock_name,
+        #                          corp_name, address, est_dt)  ← 뒤 3개는 DART 앵커(정체성)용
         group_dart_info: dict[tuple[str, str], tuple] = {}
         for m, d in (
             db.query(Mapping, DartRaw)
@@ -249,7 +250,10 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
         ):
             gk = nps_id_to_group_key.get(m.nps_id)
             if gk:
-                group_dart_info[gk] = (d.eng_name, d.website, d.id, d.corp_cls, d.stock_name)
+                group_dart_info[gk] = (
+                    d.eng_name, d.website, d.id, d.corp_cls, d.stock_name,
+                    d.corp_name, d.address, d.est_dt,
+                )
 
         # DART empSttus: dart_id → 최신연도 전사 평균연봉 (원)
         # 남/여 row 를 headcount 가중평균:
@@ -289,6 +293,29 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
                     continue
                 emp_latest_map[row.dart_id] = avg_man
         print(f"  empSttus 공시 연봉 매핑: {len(emp_latest_map)}개 상장사 (이상치 {emp_outlier_skipped}건 제외)")
+
+        # DART 직원현황 → dart_id별 "최신연도 인원 합계" (상장사 인원의 권위 출처).
+        # NPS 사업장 그룹핑이 틀려도 상장사 인원은 DART 공시로 정확히 채운다.
+        # 부문×성별로 쪼개진 행을 합산. 단 '합계'성 business_unit 이 있으면 그것만 써서 중복합산 방지.
+        hc_rows = (
+            db.query(
+                DartEmpSttus.dart_id, DartEmpSttus.year,
+                DartEmpSttus.business_unit, DartEmpSttus.total_count,
+            )
+            .filter(DartEmpSttus.total_count.isnot(None), DartEmpSttus.total_count > 0)
+            .all()
+        )
+        _hc_by_dy: dict[int, dict[int, list]] = {}
+        for r in hc_rows:
+            _hc_by_dy.setdefault(r.dart_id, {}).setdefault(r.year, []).append(
+                ((r.business_unit or ""), r.total_count)
+            )
+        emp_headcount_map: dict[int, int] = {}
+        for did, by_year in _hc_by_dy.items():
+            rows_y = by_year[max(by_year)]   # 최신연도
+            total_like = [tc for bu, tc in rows_y if "합계" in bu]
+            emp_headcount_map[did] = sum(total_like) if total_like else sum(tc for _, tc in rows_y)
+        print(f"  DART 직원현황 인원: {len(emp_headcount_map)}개 상장사")
 
         # ── 서비스 테이블 초기화 ──
         # companies: slug 기반 UPSERT 로 보존 (company_id 유지 → comments FK 안 깨짐)
@@ -347,18 +374,10 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
                 skipped_holdings += 1
                 continue
 
-            # 그룹 내 합산
+            # 그룹 내 합산 (NPS)
             total_subscribers = sum((wm.subscribers or 0) for wm, _ in members)
             total_notified = sum((wm.notified_amount or 0) for wm, _ in members)
             est_salary = _estimate_salary(total_notified, total_subscribers)
-
-            idx += 1
-            slug = _slugify(rep_wp.name)
-            if slug in seen_slugs:
-                slug = f"{slug}-{rep_wp.id}"
-            seen_slugs.add(slug)
-
-            industry_name = industry_map.get(rep_wp.industry_code) if rep_wp.industry_code else None
 
             dart_info = group_dart_info.get(gk)
             eng_name = dart_info[0] if dart_info else None
@@ -370,18 +389,41 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
             # 상장 여부: DART corp_cls가 Y(코스피)/K(코스닥)/N(코넥스)이면 True
             is_listed = corp_cls in ("Y", "K", "N") if corp_cls else False
 
-            # aliases — 같은 그룹 사업장명 + DART 영문명·종목명 + 한영 변환
+            idx += 1
+
+            # ── 정체성(이름·slug·주소·설립) — DART 매칭 회사는 DART 기준(앵커),
+            #    아니면 NPS 대표 사업장 기준. 업종은 NPS 코드 유지(Industry 테이블 정합).
+            if dart_info:
+                disp_name = dart_info[5] or rep_wp.name          # DART corp_name
+                address = dart_info[6] or rep_wp.address_road or rep_wp.address_lot
+                dart_est = dart_info[7]                           # DART 설립일(실제 설립)
+                founded_year = dart_est.year if dart_est else (
+                    rep_wp.applied_at.year if rep_wp.applied_at else None
+                )
+            else:
+                disp_name = rep_wp.name
+                address = rep_wp.address_road or rep_wp.address_lot
+                founded_year = rep_wp.applied_at.year if rep_wp.applied_at else None
+
+            industry_name = industry_map.get(rep_wp.industry_code) if rep_wp.industry_code else None
+
+            slug = _slugify(disp_name)
+            if slug in seen_slugs:
+                slug = f"{slug}-{rep_wp.id}"
+            seen_slugs.add(slug)
+
+            # aliases — DART 정식명 + 같은 그룹 사업장명(옛 표기 검색 보존) + 영문명·종목명
             member_names = [wp.name for _, wp in members]
-            aliases = _build_aliases(rep_wp.name, member_names, eng_name, stock_name)
+            aliases = _build_aliases(disp_name, member_names, eng_name, stock_name)
 
             company_rows.append({
                 "slug": slug,
-                "name": rep_wp.name,
+                "name": disp_name,
                 "eng_name": eng_name,
                 "industry": industry_name,
                 "industry_code": rep_wp.industry_code,
-                "address": rep_wp.address_road or rep_wp.address_lot,
-                "founded_year": rep_wp.applied_at.year if rep_wp.applied_at else None,
+                "address": address,
+                "founded_year": founded_year,
                 "website": website,
                 "nps_id": rep_wp.id,
                 "is_listed": is_listed,
@@ -401,17 +443,22 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
             )
             prev_salary = _estimate_salary(prev_total_notif, prev_total_subs) if prev_total_subs > 0 else None
 
+            # 인원수: DART 매칭 회사는 직원현황 공시(권위) 우선, 없으면 NPS 그룹 합산.
+            # → NPS 사업장 그룹핑이 틀려도 상장사 인원은 정확.
+            dart_headcount = emp_headcount_map.get(dart_id) if dart_id else None
+            headcount = dart_headcount if dart_headcount else total_subscribers
+
             summary_rows.append({
                 "_idx": idx,
                 "avg_salary": est_salary if est_salary > 0 else None,
                 "avg_salary_official": avg_salary_official,
                 "avg_salary_capped": est_salary >= 80_690_000,   # NPS 연소득 상한 8,069만원
                 "prev_year_avg_salary": prev_salary if prev_salary else None,
-                "total_employees": total_subscribers,
+                "total_employees": headcount,
                 "turnover_rate": turnover,
             })
 
-            hr_rows.append({"_idx": idx, "current": total_subscribers})
+            hr_rows.append({"_idx": idx, "current": headcount})
 
             # HR 트렌드: 그룹 내 모든 멤버의 월별 in/out + 가입자수 합산
             trend_agg: dict = {}   # year_month -> [in, out, subscribers]
@@ -488,23 +535,8 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
             })
             company_dart_ids.append(dart.id)
 
-            # DART empSttus 에서 직원수 추정
-            dart_emp_count = (
-                db.query(func.sum(DartEmpSttus.total_count))
-                .filter(
-                    DartEmpSttus.dart_id == dart.id,
-                    DartEmpSttus.business_unit == "성별합계",
-                    DartEmpSttus.total_count.isnot(None),
-                )
-                .scalar()
-            )
-            # 위 성별합계 못 찾으면 전체 합 (덜 정확)
-            if not dart_emp_count:
-                dart_emp_count = (
-                    db.query(func.sum(DartEmpSttus.total_count))
-                    .filter(DartEmpSttus.dart_id == dart.id, DartEmpSttus.total_count.isnot(None))
-                    .scalar()
-                )
+            # DART 직원현황 인원 (위에서 미리 집계한 map 사용)
+            dart_emp_count = emp_headcount_map.get(dart.id)
 
             summary_rows.append({
                 "_idx": idx,
@@ -713,7 +745,36 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
         _bulk_insert(db, CompanyFinance, finance_current_rows)
         _bulk_insert(db, CompanyFinanceHistory, finance_history_rows)
 
+        # ── orphan 제거: 이번 빌드에 없는 옛 회사 삭제 (slug 변경·사업장 폐업 등) ──
+        # 댓글 보존 안 함(사용자 결정) — orphan 의 댓글도 함께 삭제.
+        produced_slugs = {r["slug"] for r in company_rows}
+        orphan_ids = [
+            cid for slug, cid in db.query(Company.slug, Company.id).all()
+            if slug not in produced_slugs
+        ]
+        if orphan_ids:
+            for i in range(0, len(orphan_ids), 5000):
+                chunk = orphan_ids[i:i + 5000]
+                db.execute(text("DELETE FROM company_comments WHERE company_id = ANY(:ids)"), {"ids": chunk})
+                db.execute(text("DELETE FROM companies WHERE id = ANY(:ids)"), {"ids": chunk})
+            db.flush()
+        print(f"  orphan 회사 삭제: {len(orphan_ids)}건")
+
         db.commit()
+
+        # ── QA: 상장사인데 '매출 큰데 인원 적음' = 매칭 의심 (자동 점검 리포트) ──
+        anomalies = db.execute(text("""
+            SELECT c.name, s.total_employees AS emp, f.revenue_current AS rev
+            FROM companies c
+            JOIN company_summary s ON s.company_id = c.id
+            JOIN company_finance f ON f.company_id = c.id
+            WHERE c.is_listed AND s.total_employees < 50 AND f.revenue_current > 1e11
+            ORDER BY f.revenue_current DESC
+        """)).mappings().all()
+        print(f"\n[QA] 의심(상장·매출>1000억·인원<50): {len(anomalies)}건")
+        for a in anomalies[:15]:
+            print(f"   emp={a['emp']!s:>5} rev={a['rev']/1e12:>6.2f}조 | {a['name']}")
+
         print(f"\n완료!")
         print(f"  companies: {len(company_rows)}건")
         print(f"  company_hr_trends: {len(hr_trend_final)}건")

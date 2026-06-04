@@ -35,6 +35,51 @@ def _normalize(name: str) -> str:
     return s
 
 
+# NPS 근로자구분 접미사 — 같은 회사를 근로자 종류별로 따로 등록한 사업장을 한 회사로 흡수.
+# 예: "현대건설(주) 임직원" / "현대건설(주)-한국인근로자" / "현대건설(주)일용근로자" → 같은 회사.
+# Why: 깔끔한 베이스명("현대건설(주)") 사업장이 없으면 본체 식별이 변형들을 각각 다른 회사로 쪼갬.
+_WORKER_SUFFIX_RE = re.compile(
+    r"\s*[-/(]*\s*("
+    r"임직원|상용근로자|상용직|상용|"
+    r"한국인근로자|외국인근로자|외국인|"
+    r"일용근로자|일용직|일용|"
+    r"단시간근로자|단시간|아르바이트|파견|시간제"
+    r")\s*\)?\s*$"
+)
+
+
+def _strip_worker_suffix(name: str) -> str:
+    """근로자구분 접미사 + /일용/·/상용/ 이하 제거 (반복 적용)."""
+    s = name or ""
+    s = re.sub(r"/(일용|상용)/.*", "", s)
+    prev = None
+    while prev != s:
+        prev = s
+        s = _WORKER_SUFFIX_RE.sub("", s).strip()
+    return s
+
+
+# 법인키워드 뒤에 붙는 지점/공장/근로자 등 잔여 텍스트 제거용.
+# 키워드가 맨 앞(예: "(주)성우하이텍")이면 lookbehind(?<=.) 때문에 보존 — 회사명 통째 삭제 방지.
+# 예: "롯데웰푸드(주)양산공장" → "롯데웰푸드(주)", "넥센타이어(주)서울사무소" → "넥센타이어(주)"
+_LEGAL_CUT_RE = re.compile(r"(?<=.)(\(주\)|㈜|\(유\)|주식회사|유한회사)\s*[-/]?\s*\S.*$")
+
+
+def _group_normalize(name: str) -> str:
+    """그룹화 전용 정규화: 전각→반각, 법인키워드 뒤 지점/공장/근로자구분 잔여 제거 후 _normalize.
+    같은 회사의 지점·공장·근로자구분·전각 표기 차이를 같은 그룹 키로 모은다.
+    예) "롯데웰푸드(주)양산공장" / "롯데웰푸드(주)푸드사업장" / "롯데웰푸드(주)" → 모두 "롯데웰푸드".
+    """
+    s = (name or "").replace("（", "(").replace("）", ")").replace("／", "/")
+    s = re.sub(r"/(일용|상용)/.*", "", s)
+    prev = None
+    while prev != s:
+        prev = s
+        s = _LEGAL_CUT_RE.sub(lambda m: m.group(1), s).strip()   # 법인키워드 뒤 잔여 제거
+        s = _strip_worker_suffix(s)                              # 키워드 없는 근로자구분 접미사
+    return _normalize(s)
+
+
 # 영문 알파벳 → 한국식 글자별 발음. 한국 기업 약자 (LG/SK/CJ 등) 가 알파벳을
 # 한 글자씩 한글로 읽는 패턴이라 사전만 있으면 대부분 자동 변환됨.
 _ALPHABET_TO_KOREAN = {
@@ -89,8 +134,8 @@ def nps_company_key(biz_no: str | None, name: str | None) -> tuple[str, str]:
     )
     # 끝의 괄호 추가설명 제거 (예: "(지점2)", "(MSC)")
     base = re.sub(r"\s*\([^)]+\)\s*$", "", base)
-    # 일반 정규화 (법인 키워드 제거, 공백/특수문자 정리)
-    base = _normalize(base)
+    # 그룹 정규화 (근로자구분 접미사·전각괄호 흡수 + 법인 키워드/특수문자 정리)
+    base = _group_normalize(base)
     return (biz_no, base)
 
 
@@ -109,14 +154,14 @@ def _find_masters_in_group(members: list) -> list:
     for m in members:
         if not any(kw in (m.name or "") for kw in LEGAL_ENTITY_KEYWORDS):
             continue
-        norm = _normalize(m.name)
+        norm = _group_normalize(m.name)
         if len(norm) < MASTER_MIN_NORM_LEN:
             continue
         # 같은 정규화 이름의 후보가 여러 개면 가장 깨끗한 (원본 이름 짧은) 것
         if norm not in candidates_by_norm or len(m.name) < len(candidates_by_norm[norm].name):
             candidates_by_norm[norm] = m
     # 정규화 이름 짧은 순서로 정렬 (군더더기 없는 본체 우선)
-    return sorted(candidates_by_norm.values(), key=lambda m: len(_normalize(m.name)))
+    return sorted(candidates_by_norm.values(), key=lambda m: len(_group_normalize(m.name)))
 
 
 def _common_prefix_len(s1: str, s2: str) -> int:
@@ -139,11 +184,11 @@ def _assign_to_master(member, masters: list):
     """
     if not masters:
         return None
-    m_norm = _normalize(member.name)
+    m_norm = _group_normalize(member.name)
     best_master = None
     best_score = 0
     for master in masters:
-        master_norm = _normalize(master.name)
+        master_norm = _group_normalize(master.name)
         master_len = len(master_norm)
         # 1) 정확 startswith
         if m_norm.startswith(master_norm):
@@ -190,9 +235,9 @@ def detect_company_groups(all_nps_rows: list) -> dict[int, tuple[str, str]]:
             continue
 
         # 본체 자신은 본인을 본체로 등록
-        master_norms = {_normalize(mst.name): mst for mst in masters}
+        master_norms = {_group_normalize(mst.name): mst for mst in masters}
         for mst in masters:
-            nps_id_to_key[mst.id] = (prefix, _normalize(mst.name))
+            nps_id_to_key[mst.id] = (prefix, _group_normalize(mst.name))
 
         # 비본체 멤버 → 본체로 흡수 또는 자체 키
         for m in members:
@@ -200,7 +245,7 @@ def detect_company_groups(all_nps_rows: list) -> dict[int, tuple[str, str]]:
                 continue   # 이미 본체로 등록됨
             assigned = _assign_to_master(m, masters)
             if assigned is not None:
-                nps_id_to_key[m.id] = (prefix, _normalize(assigned.name))
+                nps_id_to_key[m.id] = (prefix, _group_normalize(assigned.name))
             else:
                 # 본체에 흡수 안 됨 = 같은 prefix 다른 회사 → 정규식 키
                 nps_id_to_key[m.id] = nps_company_key(m.biz_no, m.name)
@@ -391,9 +436,10 @@ def match(auto_threshold: int = 90, pending_threshold: int = 70):
     finally:
         db.close()
 
-    # 알고리즘 매칭 완료 후 manual_mappings.csv 자동 적용
+    # 알고리즘 매칭 완료 후 manual_mappings.csv + 검수결과 자동 적용
     print()
     apply_manual_mappings()
+    apply_reviewed_csv()
 
 
 def export_pending(output_path: str = "data/pending_review.csv"):
@@ -535,6 +581,49 @@ def apply_manual_mappings(input_path: str = "data/manual_mappings.csv"):
         db.close()
 
 
+def apply_reviewed_csv(input_path: str = "data/pending_review_reviewed.csv"):
+    """검수 완료(pending_review_reviewed.csv)를 (dart bizr_no + nps name) 페어로 현재 mapping에 재적용.
+    mapping_id 가 재생성돼도 안전하게 매칭 — rejected→매칭 제외, matched→확정.
+    Why: DELETE FROM mapping 후 재match 하면 mapping_id 가 바뀌어 mapping_id 기반 재import 불가.
+    """
+    path = Path(input_path)
+    if not path.exists():
+        print(f"reviewed csv 없음: {path} (스킵)")
+        return
+    db = SessionLocal()
+    try:
+        by_pair: dict[tuple[str, str], list] = {}
+        for m, d, n in (
+            db.query(Mapping, DartRaw, NpsRaw)
+            .join(DartRaw, Mapping.dart_id == DartRaw.id)
+            .join(NpsRaw, Mapping.nps_id == NpsRaw.id)
+            .all()
+        ):
+            by_pair.setdefault(((d.bizr_no or "").strip(), (n.name or "").strip()), []).append(m)
+
+        rej = mat = notfound = 0
+        with open(path, encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                st = (r.get("status") or "").strip().lower()
+                if st not in ("matched", "rejected"):
+                    continue
+                key = ((r.get("dart_bizr_no") or "").strip(), (r.get("nps_name") or "").strip())
+                ms = by_pair.get(key, [])
+                if not ms:
+                    notfound += 1
+                    continue
+                for m in ms:
+                    m.status = "rejected" if st == "rejected" else "matched"
+                if st == "rejected":
+                    rej += 1
+                else:
+                    mat += 1
+        db.commit()
+        print(f"reviewed.csv 재적용: rejected {rej}건, matched {mat}건, 현재mapping에 없음 {notfound}건")
+    finally:
+        db.close()
+
+
 def dry_run_grouping(limit: int = 30):
     """본체 자동 식별 (D 알고리즘) dry-run.
     DB 변경 없이 그룹화 결과만 출력. 흡수 케이스 상위 N개 표시.
@@ -565,7 +654,7 @@ def dry_run_grouping(limit: int = 30):
             prefix, master_name = key
             print(f"\n[{i}] biz_no={prefix}, 본체='{master_name}', 멤버 {len(members)}개")
             for m in members[:10]:
-                marker = "★" if _normalize(m.name) == master_name else "  "
+                marker = "★" if _group_normalize(m.name) == master_name else "  "
                 print(f"   {marker} {m.name}")
             if len(members) > 10:
                 print(f"   ... 외 {len(members) - 10}개")
