@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import SearchTerm
+from app.models import SearchTerm, Company
 
 router = APIRouter(prefix="/api/search-terms", tags=["search-terms"])
 
@@ -38,10 +38,10 @@ class RecordIn(BaseModel):
     keyword: str
 
 
-class SearchTermOut(BaseModel):
-    keyword: str
-
-    model_config = {"from_attributes": True}
+class RecentItemOut(BaseModel):
+    keyword: str          # 기록된 원본 검색어(= 조회 당시 회사명)
+    name: str             # 화면 표시명: 매칭되면 정식명, 아니면 keyword
+    slug: str | None = None  # 매칭된 회사 slug (있으면 클릭 시 바로 상세 이동)
 
 
 @router.post("", status_code=204)
@@ -65,12 +65,42 @@ def record(body: RecordIn, db: Session = Depends(get_db)):
     db.commit()
 
 
-@router.get("/recent", response_model=list[SearchTermOut])
+@router.get("/recent", response_model=list[RecentItemOut])
 def recent(limit: int = 10, db: Session = Depends(get_db)):
+    """최근 조회 기업. 검색어(=조회 당시 회사명)를 회사와 매칭해 정식명·slug 부여.
+    같은 회사로 매칭되는 변형들은 1개로 흡수(dedupe) → 여유있게 가져와서 추린다.
+    """
     limit = max(1, min(limit, 20))
-    return (
+    raw = (
         db.query(SearchTerm)
         .order_by(SearchTerm.last_searched_at.desc())
-        .limit(limit)
+        .limit(limit * 5)
         .all()
     )
+    keywords = [t.keyword for t in raw]
+    # 이름 정확일치 일괄 조회 (대부분 여기서 해결)
+    name_matches = {
+        c.name: c for c in db.query(Company).filter(Company.name.in_(keywords)).all()
+    }
+
+    out: list[RecentItemOut] = []
+    seen: set[str] = set()
+    for t in raw:
+        company = name_matches.get(t.keyword)
+        if company is None:
+            # 옛 표기 등은 별칭(aliases)으로 매칭 (예: "현대건설(주)일용근로자" → 현대건설(주))
+            company = db.query(Company).filter(Company.aliases.any(t.keyword)).first()
+        key = company.slug if company else f"kw:{t.keyword}"
+        if key in seen:
+            continue  # 같은 회사(또는 같은 미매칭 검색어) 중복 제거
+        seen.add(key)
+        out.append(
+            RecentItemOut(
+                keyword=t.keyword,
+                name=company.name if company else t.keyword,
+                slug=company.slug if company else None,
+            )
+        )
+        if len(out) >= limit:
+            break
+    return out
