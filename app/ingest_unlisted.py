@@ -105,6 +105,124 @@ def _parse_dt(s):
         return None
 
 
+# ── Phase B: 감사보고서 문서 파싱 (사업보고서 미제출 = API 013 인 회사) ──
+import re  # noqa: E402
+
+_REV = re.compile(r"매출액|영업수익|수익\(매출")
+_OP = re.compile(r"영업이익|영업손실")
+_NP = re.compile(r"당기순이익|당기순손실")
+
+
+def _cells(tr):
+    return [
+        re.sub(r"<[^>]+>", " ", c).replace("&nbsp;", " ").strip()
+        for c in re.findall(r"<T[DH][^>]*>(.*?)</T[DH]>", tr, re.S | re.I)
+    ]
+
+
+def _num(s):
+    neg = (s.strip().startswith("(") and ")" in s) or "△" in s
+    d = re.sub(r"[^\d]", "", s)
+    return None if not d else (-int(d) if neg else int(d))
+
+
+def _first_amt(rc):
+    for c in rc[1:]:
+        if re.search(r"\d,\d{3}", c):  # 천단위 콤마 = 금액 (주석번호 제외)
+            return _num(c)
+    return None
+
+
+def _label(cell):
+    return re.sub(r"^[ⅠⅡⅢⅣⅤⅥ\d\.\s]+", "", cell)
+
+
+def _parse_audit_doc(text: str):
+    """감사보고서 문서(HTML형 표)에서 손익계산서 매출/영업이익/당기순이익 추출.
+    단일표(무신사)·페이지분할표(배민) 모두 대응: 매출 행을 가진 표부터 이어지는 표까지 본다.
+    당기(좌측 첫 콤마숫자)를 채택. 단위(원/천원/백만원) 자동 환산.
+    """
+    unit = 1
+    mm = re.search(r"단위\s*[:：]\s*([가-힣]*)\s*원", text)
+    if mm:
+        unit = {"": 1, "천": 1000, "백만": 10 ** 6, "십억": 10 ** 9}.get(mm.group(1), 1)
+    tbls = [
+        [_cells(tr) for tr in re.findall(r"<TR[^>]*>(.*?)</TR>", tb, re.S | re.I)]
+        for tb in re.findall(r"<TABLE[^>]*>(.*?)</TABLE>", text, re.S | re.I)
+    ]
+    for i, rows in enumerate(tbls):
+        rev = op = np = None
+        for rc in rows:
+            if not rc:
+                continue
+            lab = _label(rc[0])
+            if rev is None and _REV.search(lab) and "외" not in lab:
+                rev = _first_amt(rc)
+            if op is None and _OP.search(lab):
+                op = _first_amt(rc)
+            if np is None and _NP.search(lab):
+                np = _first_amt(rc)
+        if rev is None:
+            continue  # 손익계산서 표 아님
+        j = i + 1
+        while (op is None or np is None) and j < min(i + 4, len(tbls)):
+            for rc in tbls[j]:
+                if not rc:
+                    continue
+                lab = _label(rc[0])
+                if op is None and _OP.search(lab):
+                    op = _first_amt(rc)
+                if np is None and _NP.search(lab):
+                    np = _first_amt(rc)
+            j += 1
+        if op is not None or np is not None:
+            return {
+                "ifrs-full_Revenue": rev * unit if rev else None,
+                "dart_OperatingIncomeLoss": op * unit if op is not None else None,
+                "ifrs-full_ProfitLoss": np * unit if np is not None else None,
+            }
+    return None
+
+
+def _audit_reports(cc: str, years: list[int]):
+    """list.json → {bsns_year: rcept_no} (연결감사보고서 우선, 없으면 감사보고서)."""
+    bgn = f"{min(years)}0101"
+    end = f"{max(years) + 1}1231"
+    j = _get(f"{BASE}/list.json", {"corp_code": cc, "bgn_de": bgn, "end_de": end, "page_count": "100"})
+    items = j.get("list", []) if j.get("status") == "000" else []
+    by_year: dict[int, str] = {}
+    for prefer in ("연결감사보고서", "감사보고서"):
+        for it in items:
+            nm = it.get("report_nm", "")
+            if not nm.startswith(prefer):
+                continue
+            m = re.search(r"\((\d{4})\.\d{2}\)", nm)  # "(2023.12)" → 사업연도
+            if not m:
+                continue
+            y = int(m.group(1))
+            if y in years and y not in by_year:
+                by_year[y] = it["rcept_no"]
+    return by_year
+
+
+def _fetch_audit_finance(cc: str, years: list[int]):
+    """{bsns_year: {account_id: amount}} — 감사보고서 파싱 결과."""
+    out: dict[int, dict] = {}
+    for y, rcept in _audit_reports(cc, years).items():
+        try:
+            r = requests.get(f"{BASE}/document.xml",
+                             params={"crtfc_key": settings.dart_api_key, "rcept_no": rcept}, timeout=40)
+            zf = zipfile.ZipFile(io.BytesIO(r.content))
+            doc = zf.read(zf.namelist()[0]).decode("utf-8", "replace")
+        except (zipfile.BadZipFile, requests.RequestException):
+            continue
+        parsed = _parse_audit_doc(doc)
+        if parsed and parsed.get("ifrs-full_Revenue"):
+            out[y] = parsed
+        time.sleep(0.1)
+    return out
+
+
 def run(names: list[str], years: list[int]):
     targets = _resolve(names, _load_corpcode())
     db = SessionLocal()
@@ -179,8 +297,36 @@ def run(names: list[str], years: list[int]):
                         ))
                     fin_rows += 1
 
-            print(f"  {'✅' if got_year else '⏭️ '} {nm:16} dart_id={dart.id} "
-                  f"{'재무 적재' if got_year else '재무 없음(013) → Phase B 감사보고서 대상'}")
+            # Phase B: 사업보고서 미제출(API 013) → 감사보고서 문서 파싱 fallback
+            src = "API"
+            if not got_year:
+                audit = _fetch_audit_finance(cc, years)
+                for y, accounts in audit.items():
+                    for aid, amt in accounts.items():
+                        if amt is None:
+                            continue
+                        st = "포괄손익계산서 - 감사보고서"
+                        ex = (
+                            db.query(DartFinanceRaw)
+                            .filter_by(dart_id=dart.id, bsns_year=str(y),
+                                       account_id=aid, statement_type=st)
+                            .first()
+                        )
+                        if ex:
+                            ex.current_amount = amt
+                        else:
+                            db.add(DartFinanceRaw(
+                                dart_id=dart.id, stock_code=None, bsns_year=str(y),
+                                report_type="감사보고서", statement_type=st,
+                                account_id=aid, account_nm=aid, current_amount=amt,
+                                currency="KRW", ingested_at=datetime.utcnow(),
+                            ))
+                        fin_rows += 1
+                if audit:
+                    got_year, src = True, "감사보고서"
+
+            print(f"  {'✅' if got_year else '❌'} {nm:16} dart_id={dart.id} "
+                  f"{'재무 적재(' + src + ')' if got_year else '재무 수집 실패'}")
         db.commit()
         print(f"\n완료: dart_raw {dart_ok}건, finance {fin_rows}행")
         print("다음 단계: python -m app.match  →  python -m app.compute")
