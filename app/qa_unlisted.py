@@ -84,19 +84,15 @@ def run(xlsx: str, apply: bool = False):
                 miss += 1
                 anomalies.append((en, dn, "재무없음(파서실패/미제출)", exv))
                 continue
+            # 엑셀 재무는 더미라 "참고 표시만" — DB는 절대 안 건드림(읽기전용 리포트).
+            # 실제 불량 제거는 compute 내장 internal sanity 가 DART 데이터로만 판단함.
             financial = any(k in (dn or "") for k in _FINANCIAL)
             if exv and not financial and not (0.4 <= serv / exv <= 2.5):
                 mism += 1
-                anomalies.append((en, dn, f"불일치(서빙 {serv/1e12:.2f}조 vs 엑셀 {exv/1e12:.2f}조)", exv))
-                if apply:  # 엑셀 정답지와 크게 다른 비금융사 재무 = 오파싱/오매칭 → 삭제
-                    db.execute(text("DELETE FROM company_finance WHERE company_id=:i"), {"i": cid})
-                    db.execute(text("DELETE FROM company_finance_history WHERE company_id=:i"), {"i": cid})
-                    gated += 1
+                anomalies.append((en, dn, f"엑셀과 차이(참고: 서빙 {serv/1e12:.2f}조 vs 엑셀 {exv/1e12:.2f}조)", exv))
             else:
                 ok += 1
-        if apply:
-            db.commit()
-            print(f"[게이트 적용] 불량 재무 삭제: {gated}건")
+        _ = (apply, gated)  # apply 무시 — 엑셀로 DB 수정 안 함
         OUT.parent.mkdir(parents=True, exist_ok=True)
         with open(OUT, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
