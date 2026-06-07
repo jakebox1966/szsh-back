@@ -717,7 +717,9 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
                 def _growth(cur, prev_v):
                     if cur is None or prev_v is None or prev_v == 0:
                         return None
-                    return round((cur - prev_v) / abs(prev_v) * 100, 2)
+                    g = round((cur - prev_v) / abs(prev_v) * 100, 2)
+                    # NUMERIC(10,2) 한도 보호 + 비정상 급변(전년 오파싱) 제거
+                    return g if -99999 <= g <= 99999 else None
 
                 slug = cr["slug"]
                 cid = slug_to_id[slug]
