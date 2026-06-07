@@ -186,23 +186,24 @@ def _parse_audit_doc(text: str):
 
 
 def _audit_reports(cc: str, years: list[int]):
-    """list.json → {bsns_year: rcept_no} (연결감사보고서 우선, 없으면 감사보고서)."""
-    bgn = f"{min(years)}0101"
-    end = f"{max(years) + 1}1231"
-    j = _get(f"{BASE}/list.json", {"corp_code": cc, "bgn_de": bgn, "end_de": end, "page_count": "100"})
-    items = j.get("list", []) if j.get("status") == "000" else []
+    """{bsns_year: rcept_no}. 연도별로 조회(페이지네이션 회피 — 대기업은 공시가 많아
+    5년치 한 번에 조회하면 감사보고서가 page 밖으로 밀림). FY y 감사보고서는 y+1년 상반기 제출.
+    """
     by_year: dict[int, str] = {}
-    for prefer in ("연결감사보고서", "감사보고서"):
-        for it in items:
-            nm = it.get("report_nm", "")
-            if not nm.startswith(prefer):
-                continue
-            m = re.search(r"\((\d{4})\.\d{2}\)", nm)  # "(2023.12)" → 사업연도
-            if not m:
-                continue
-            y = int(m.group(1))
-            if y in years and y not in by_year:
-                by_year[y] = it["rcept_no"]
+    for y in years:
+        j = _get(f"{BASE}/list.json", {"corp_code": cc, "bgn_de": f"{y + 1}0101",
+                                       "end_de": f"{y + 1}0930", "page_count": "100"})
+        items = j.get("list", []) if j.get("status") == "000" else []
+        for prefer in ("연결감사보고서", "감사보고서"):
+            hit = next(
+                (it["rcept_no"] for it in items
+                 if it.get("report_nm", "").startswith(prefer) and f"({y}." in it.get("report_nm", "")),
+                None,
+            )
+            if hit:
+                by_year[y] = hit
+                break
+        time.sleep(0.05)
     return by_year
 
 

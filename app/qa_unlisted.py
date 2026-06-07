@@ -54,37 +54,49 @@ def _excel_revenue(xlsx: str) -> dict:
     return out
 
 
-def run(xlsx: str):
+# 금융사: 매출 정의(보험수익 vs 수입보험료, 이자수익 등)가 달라 엑셀과 큰 차이 정상 → 게이트 제외
+_FINANCIAL = ("생명", "손해", "화재", "은행", "증권", "카드", "캐피탈", "금융", "보험", "저축", "자산운용")
+
+
+def run(xlsx: str, apply: bool = False):
     excel = _excel_revenue(xlsx)
     targets = list(csv.DictReader(open(TARGETS, encoding="utf-8-sig")))
     db = SessionLocal()
-    ok = miss = mism = noco = 0
+    ok = miss = mism = noco = gated = 0
     anomalies = []
     try:
         for t in targets:
             en, cc = t["excel_name"], t["corp_code"]
             dn = db.execute(text("SELECT corp_name FROM dart_raw WHERE corp_code=:c"), {"c": cc}).scalar()
-            row = db.execute(
-                text("SELECT f.revenue_current FROM companies c "
+            comp = db.execute(
+                text("SELECT c.id, f.revenue_current FROM companies c "
                      "LEFT JOIN company_finance f ON f.company_id=c.id "
                      "WHERE c.name=:n ORDER BY f.revenue_current DESC NULLS LAST LIMIT 1"),
                 {"n": dn},
             ).first() if dn else None
             exv = excel.get(en)
-            if row is None:
+            if comp is None:
                 noco += 1
                 anomalies.append((en, dn or "?", "서빙회사없음(미매칭)", exv))
                 continue
-            serv = row[0]
+            cid, serv = comp[0], comp[1]
             if serv is None:
                 miss += 1
                 anomalies.append((en, dn, "재무없음(파서실패/미제출)", exv))
                 continue
-            if exv and not (0.5 <= serv / exv <= 2.0):
+            financial = any(k in (dn or "") for k in _FINANCIAL)
+            if exv and not financial and not (0.4 <= serv / exv <= 2.5):
                 mism += 1
                 anomalies.append((en, dn, f"불일치(서빙 {serv/1e12:.2f}조 vs 엑셀 {exv/1e12:.2f}조)", exv))
+                if apply:  # 엑셀 정답지와 크게 다른 비금융사 재무 = 오파싱/오매칭 → 삭제
+                    db.execute(text("DELETE FROM company_finance WHERE company_id=:i"), {"i": cid})
+                    db.execute(text("DELETE FROM company_finance_history WHERE company_id=:i"), {"i": cid})
+                    gated += 1
             else:
                 ok += 1
+        if apply:
+            db.commit()
+            print(f"[게이트 적용] 불량 재무 삭제: {gated}건")
         OUT.parent.mkdir(parents=True, exist_ok=True)
         with open(OUT, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -103,7 +115,9 @@ def run(xlsx: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", default="~/Downloads/top_1000_unlisted_comprehensive.xlsx")
-    run(ap.parse_args().xlsx)
+    ap.add_argument("--apply", action="store_true", help="엑셀과 크게 다른 비금융사 재무 삭제(게이트)")
+    a = ap.parse_args()
+    run(a.xlsx, apply=a.apply)
 
 
 if __name__ == "__main__":
