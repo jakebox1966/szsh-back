@@ -114,9 +114,10 @@ _NP = re.compile(r"당기순이익|당기순손실")
 
 
 def _cells(tr):
+    # DART 문서는 셀을 <TD>/<TH> 또는 <TE>(account 코드 포함형)로 씀 — 셋 다 처리
     return [
         re.sub(r"<[^>]+>", " ", c).replace("&nbsp;", " ").strip()
-        for c in re.findall(r"<T[DH][^>]*>(.*?)</T[DH]>", tr, re.S | re.I)
+        for c in re.findall(r"<T[DHE][^>]*>(.*?)</T[DHE]>", tr, re.S | re.I)
     ]
 
 
@@ -223,12 +224,38 @@ def _fetch_audit_finance(cc: str, years: list[int]):
     return out
 
 
-def run(names: list[str], years: list[int]):
-    targets = _resolve(names, _load_corpcode())
+def _load_targets_csv(path: str):
+    """unlisted_targets.csv → [(corp_code, corp_name, '')]."""
+    import csv as _csv
+    out = []
+    with open(path, encoding="utf-8-sig") as f:
+        for r in _csv.DictReader(f):
+            cc = (r.get("corp_code") or "").strip()
+            if cc:
+                out.append((cc, (r.get("corp_name") or "").strip(), ""))
+    return out
+
+
+def run(years: list[int], names: list[str] | None = None,
+        targets_csv: str | None = None, throttle: float = 0.3):
+    if targets_csv:
+        targets = _load_targets_csv(targets_csv)
+    else:
+        targets = _resolve(names or SEED, _load_corpcode())
+    print(f"적재 대상: {len(targets)}곳")
     db = SessionLocal()
-    dart_ok = fin_rows = 0
+    dart_ok = fin_rows = skipped = 0
     try:
-        for cc, nm, _sc in targets:
+        for ti, (cc, nm, _sc) in enumerate(targets, 1):
+            # resume: 이미 재무 적재된 corp_code 는 스킵 (API 절약)
+            existing = db.query(DartRaw).filter(DartRaw.corp_code == cc).first()
+            if existing and db.query(DartFinanceRaw.id).filter(DartFinanceRaw.dart_id == existing.id).first():
+                skipped += 1
+                continue
+            if ti % 10 == 0:
+                db.commit()  # 주기적 커밋 → 중간에 끊겨도 resume 가능
+                print(f"  …진행 {ti}/{len(targets)} (적재 {dart_ok}, 스킵 {skipped})")
+            time.sleep(throttle)  # 레이트리밋 완화
             info = _get(f"{BASE}/company.json", {"corp_code": cc})
             if info.get("status") != "000":
                 print(f"  ⚠ company.json 실패: {nm} ({info.get('message')})")
@@ -328,7 +355,7 @@ def run(names: list[str], years: list[int]):
             print(f"  {'✅' if got_year else '❌'} {nm:16} dart_id={dart.id} "
                   f"{'재무 적재(' + src + ')' if got_year else '재무 수집 실패'}")
         db.commit()
-        print(f"\n완료: dart_raw {dart_ok}건, finance {fin_rows}행")
+        print(f"\n완료: dart_raw {dart_ok}건, finance {fin_rows}행, 스킵(이미적재) {skipped}건")
         print("다음 단계: python -m app.match  →  python -m app.compute")
     except Exception as e:
         db.rollback()
@@ -339,12 +366,18 @@ def run(names: list[str], years: list[int]):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="비상장사 재무 적재 (Phase A)")
+    ap = argparse.ArgumentParser(description="비상장사 재무 적재 (Phase A+B)")
     ap.add_argument("--names", type=str, default="", help="쉼표구분 회사명 (없으면 SEED)")
+    ap.add_argument("--targets-csv", type=str, default="", help="corp_code 명단 CSV (예: data/dart/unlisted_targets.csv)")
     ap.add_argument("--years", type=str, default="2021,2022,2023,2024")
+    ap.add_argument("--throttle", type=float, default=0.3)
     a = ap.parse_args()
-    names = [x.strip() for x in a.names.split(",") if x.strip()] or SEED
-    run(names, [int(y) for y in a.years.split(",")])
+    years = [int(y) for y in a.years.split(",")]
+    if a.targets_csv:
+        run(years, targets_csv=a.targets_csv, throttle=a.throttle)
+    else:
+        names = [x.strip() for x in a.names.split(",") if x.strip()] or SEED
+        run(years, names=names, throttle=a.throttle)
 
 
 if __name__ == "__main__":
