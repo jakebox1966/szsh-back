@@ -46,11 +46,10 @@ def _format_time(dt):
     return f"{days}일 전"
 
 
-@router.get("", response_model=list[CompanyListItem])
-def search_companies(q: str = Query("", description="Search keyword"), db: Session = Depends(get_db)):
+def run_company_search(q: str, db: Session):
+    """회사 검색(pg_trgm 유사도 + aliases 배열 매칭). /api/companies·/api/search 공용."""
     if not q:
         return db.query(Company).limit(20).all()
-    # pg_trgm 유사도 + aliases 배열 매칭 (GIN 인덱스 활용)
     # similarity(name, q) 또는 q ∈ aliases 또는 부분 일치 fallback
     rows = db.execute(text("""
         SELECT * FROM companies
@@ -64,6 +63,11 @@ def search_companies(q: str = Query("", description="Search keyword"), db: Sessi
         LIMIT 20
     """), {"q": q, "like": f"%{q}%"}).mappings().all()
     return [dict(r) for r in rows]
+
+
+@router.get("", response_model=list[CompanyListItem])
+def search_companies(q: str = Query("", description="Search keyword"), db: Session = Depends(get_db)):
+    return run_company_search(q, db)
 
 
 @router.get("/{slug}", response_model=CompanyDetailOut)

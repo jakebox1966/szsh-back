@@ -41,6 +41,9 @@ class User(Base):
     tier = Column(String, default="free", nullable=False)     # "free" | "premium"
     ai_calls_today = Column(Integer, default=0, nullable=False)
     ai_calls_reset_at = Column(Date, nullable=True)
+    # 검색 일일 한도(회원). 비회원은 프론트 localStorage 가 담당. reset_at(KST 날짜) 바뀌면 0으로.
+    search_calls_today = Column(Integer, default=0, nullable=False)
+    search_calls_reset_at = Column(Date, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_active_at = Column(DateTime, default=datetime.utcnow, nullable=False)

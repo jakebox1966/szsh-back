@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import home, companies, auth, spotlight, comments, search
+from app.routers import home, companies, auth, spotlight, comments, search, search_query
 
 app = FastAPI(title="SZSH API", version="1.0.0")
 
@@ -64,6 +64,7 @@ app.include_router(spotlight.router)
 app.include_router(companies.router)
 app.include_router(comments.router)
 app.include_router(search.router)
+app.include_router(search_query.router)
 app.include_router(auth.router)
 
 
