@@ -746,6 +746,46 @@ def compute(top_n: int = 50, target_year_month: str | None = None):
 
         _bulk_insert(db, CompanyFinance, finance_current_rows)
         _bulk_insert(db, CompanyFinanceHistory, finance_history_rows)
+        db.flush()
+
+        # ── 재무 sanity 정리 (DART 데이터 자체의 상식으로만 — 외부 참조 안 씀) ──
+        # 1) 매출 ≤ 0 = 파싱오류(hy 등)
+        # 2) 1인당 매출 명백 비정상(>1000억/명) = 오파싱/오매칭(안테나 38조/58명 = 6700억/명).
+        #    ※ 임계값 주의: 정유·종합상사·석유화학은 1인당매출이 원래 150~270억/명으로 높다
+        #      (GS칼텍스 160억·포스코인터 187억·E1 269억/명). 100억/명이면 이들 정상 대기업까지
+        #      통째로 지워짐 → 절대 안전한 1000억/명(1e11)으로만 컷. 금융·지주는 추가 제외.
+        bad = db.execute(text("""
+            SELECT f.company_id FROM company_finance f
+            JOIN companies c ON c.id = f.company_id
+            LEFT JOIN company_summary s ON s.company_id = f.company_id
+            WHERE f.revenue_current IS NOT NULL
+              AND (
+                f.revenue_current <= 0
+                OR (s.total_employees >= 20
+                    AND f.revenue_current::numeric / s.total_employees > 1e11
+                    AND c.name !~ '(생명|손해|화재|은행|증권|카드|캐피탈|금융|보험|홀딩스|지주|투자|파트너스)')
+              )
+        """)).scalars().all()
+        if bad:
+            db.execute(text("DELETE FROM company_finance WHERE company_id = ANY(:ids)"), {"ids": bad})
+            db.execute(text("DELETE FROM company_finance_history WHERE company_id = ANY(:ids)"), {"ids": bad})
+        print(f"  재무 sanity 정리: {len(bad)}건 제거 (매출0/음수·1인당매출>1000억/명)")
+
+        # ── company_summary.revenue 비정규화 (라우터가 직접 읽는 최신연도 매출 — compute가 소유) ──
+        # 예전엔 deprecated ingest_finance 꼬리에서 했으나, 정식 경로(compute)가 책임지도록 흡수.
+        # sanity 로 지워진 회사는 company_finance 에 행이 없어 자동으로 NULL 유지(잘못된 매출 노출 안 됨).
+        rev_updated = db.execute(text("""
+            UPDATE company_summary cs
+            SET revenue = latest.revenue_current
+            FROM (
+                SELECT DISTINCT ON (company_id) company_id, revenue_current
+                FROM company_finance
+                WHERE revenue_current IS NOT NULL
+                ORDER BY company_id, year DESC
+            ) latest
+            WHERE cs.company_id = latest.company_id
+        """)).rowcount
+        print(f"  summary.revenue 갱신: {rev_updated}건")
 
         # ── orphan 제거: 이번 빌드에 없는 옛 회사 삭제 (slug 변경·사업장 폐업 등) ──
         # 댓글 보존 안 함(사용자 결정) — orphan 의 댓글도 함께 삭제.
