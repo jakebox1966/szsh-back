@@ -346,63 +346,80 @@ def match(auto_threshold: int = 90, pending_threshold: int = 70):
         unique_company_groups = len(set(nps_id_to_group_key.values()))
         print(f"  통합 후 회사 그룹: {unique_company_groups}개 (압축률 {(1 - unique_company_groups / len(all_nps)) * 100:.1f}%)")
 
+        # 이름 인덱스 — prefix(사업자번호 앞6자리) 불일치 시 이름(한영음차)으로 그룹 매칭.
+        # canonical_name → [(group_key, members)]. 유일 매칭만 fallback 으로 채택.
+        from collections import defaultdict as _dd
+        _group_members: dict = _dd(list)
+        for _n in all_nps:
+            _gk = nps_id_to_group_key.get(_n.id)
+            if _gk:
+                _group_members[_gk].append(_n)
+        name_index: dict = _dd(list)
+        for _gk, _mem in _group_members.items():
+            _canon = _hanyoung_canonical(_gk[1])
+            if len(_canon) >= 3:
+                name_index[_canon].append((_gk, _mem))
+        name_fallback_count = 0
+
         matched_count = 0
         pending_count = 0
         no_candidate = 0
         low_score = 0
 
         for idx, dart in enumerate(new_darts):
-            # 후보군 필터: DART bizr_no 앞 6자리 == NPS biz_no
-            prefix = dart.bizr_no[:6]
-            candidates = nps_by_prefix.get(prefix, [])
-
-            if not candidates:
-                no_candidate += 1
-                continue
-
-            # 통합 키 단위로 그룹화 — D 알고리즘 결과 활용
-            # 본점/지점/공장/일용 + 본체 자동 식별로 흡수된 사업장이 같은 회사로 합쳐짐
-            groups: dict[tuple[str, str], list] = {}
-            for nps in candidates:
-                key = nps_id_to_group_key.get(nps.id)
-                if key is None:
-                    continue
-                groups.setdefault(key, []).append(nps)
-
-            # fuzzy matching + 멀티시그널 — 그룹 단위로 점수 계산
             dart_norm = _normalize(dart.corp_name)
             dart_canonical = _hanyoung_canonical(dart_norm)
             dart_addr = (dart.address or "").strip()
             dart_induty = dart.induty_code
             dart_est = dart.est_dt
+
+            # 1차: DART bizr_no 앞 6자리 == NPS biz_no 후보군 → 멀티시그널 스코어
+            candidates = nps_by_prefix.get(dart.bizr_no[:6], [])
             best_representative = None
             best_score = 0
+            if candidates:
+                groups: dict[tuple[str, str], list] = {}
+                for nps in candidates:
+                    key = nps_id_to_group_key.get(nps.id)
+                    if key is None:
+                        continue
+                    groups.setdefault(key, []).append(nps)
+                for group_key, members in groups.items():
+                    representative = min(members, key=lambda n: len(_normalize(n.name)))
+                    nps_canonical = _hanyoung_canonical(_normalize(representative.name))
+                    base = fuzz.WRatio(dart_canonical, nps_canonical)
+                    bonus = (
+                        _addr_score(dart_addr, (representative.address_road or representative.address_lot or "").strip())
+                        + _industry_score(dart_induty, representative.industry_code)
+                        + _est_score(dart_est, representative.applied_at)
+                    )
+                    score = min(base + bonus, 100)
+                    if score > best_score:
+                        best_score = score
+                        best_representative = representative
 
-            for group_key, members in groups.items():
-                # 대표 row: 정규화 이름이 가장 짧은 것 (가장 깨끗한 본체일 가능성 높음)
-                representative = min(members, key=lambda n: len(_normalize(n.name)))
+            # 2차 fallback: 이름(한영음차) "유일·정확" 매칭으로 구제.
+            #   - prefix 후보 없음/약함(올리브영 104817↔809810) 또는
+            #   - prefix가 부분일치 오매칭(GS칼텍스→"하이팩(GS칼텍스현장)") 일 때
+            #   이름 정확일치 그룹이 유일하면 그걸로 교체.
+            dart_gcanon = _hanyoung_canonical(_group_normalize(dart.corp_name))
+            ng = name_index.get(dart_gcanon)
+            if ng and len(ng) == 1 and len(dart_gcanon) >= 3:
+                cur_exact = (
+                    best_representative is not None
+                    and _hanyoung_canonical(_group_normalize(best_representative.name)) == dart_gcanon
+                )
+                if best_score < pending_threshold or not cur_exact:
+                    _gk, _members = ng[0]
+                    best_representative = min(_members, key=lambda n: len(_normalize(n.name)))
+                    best_score = max(best_score, 90)
+                    name_fallback_count += 1
 
-                nps_norm = _normalize(representative.name)
-                nps_canonical = _hanyoung_canonical(nps_norm)
-                # 한영 음차 정규화 후 매칭 (예: "lg전자" ↔ "엘지전자" 가 같은 형태로 비교)
-                base = fuzz.WRatio(dart_canonical, nps_canonical)
-                bonus = 0
-                # 주소 비교 (시도+시군구 분리)
-                nps_addr = (representative.address_road or representative.address_lot or "").strip()
-                bonus += _addr_score(dart_addr, nps_addr)
-                # 업종코드 비교
-                bonus += _industry_score(dart_induty, representative.industry_code)
-                # 설립일 vs NPS 가입일 비교
-                bonus += _est_score(dart_est, representative.applied_at)
-
-                score = min(base + bonus, 100)
-
-                if score > best_score:
-                    best_score = score
-                    best_representative = representative
-
-            if best_score < pending_threshold:
-                low_score += 1
+            if best_representative is None or best_score < pending_threshold:
+                if not candidates:
+                    no_candidate += 1
+                else:
+                    low_score += 1
                 continue
 
             status = "matched" if best_score >= auto_threshold else "pending"
@@ -427,6 +444,7 @@ def match(auto_threshold: int = 90, pending_threshold: int = 70):
         print(f"\n완료!")
         print(f"  자동 매칭 (≥{auto_threshold}): {matched_count}건")
         print(f"  검수 필요 ({pending_threshold}~{auto_threshold - 1}): {pending_count}건")
+        print(f"  이름 fallback 매칭: {name_fallback_count}건")
         print(f"  후보 없음 (prefix 불일치): {no_candidate}건")
         print(f"  점수 미달 (<{pending_threshold}): {low_score}건")
 
