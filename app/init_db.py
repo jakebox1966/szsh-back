@@ -164,17 +164,39 @@ def _run_match():
     match()
 
 
-def _ingest_finance(folder: str):
-    from app.ingest_dart import ingest_finance
+def _ingest_finance_raw(folder: str):
+    """상장 일괄 손익계산서 TXT → dart_finance_raw (compute 가 읽는 정식 원천).
+    ※ compute 가 dart_finance_raw 를 읽어 company_finance 를 만들므로 반드시 compute 前.
+    """
+    from app.ingest_dart import ingest_finance_raw
 
-    print(f"\n═══ 6. DART 손익계산서 ═══")
-    ingest_finance(folder)
+    print(f"\n═══ 6. DART 손익계산서(raw) → dart_finance_raw ═══")
+    ingest_finance_raw(folder)
+
+
+def _ingest_unlisted(targets_csv: str, xlsx: str, years: list[int]):
+    """비상장 재무 보강: 명단(targets.csv) 기준 DART API/감사보고서 → dart_raw + dart_finance_raw.
+    targets.csv 없으면 엑셀(이름 목록만)에서 corp_code 해석해 먼저 생성. 재무는 전부 DART 출처.
+    """
+    from app.resolve_unlisted import resolve
+    from app.ingest_unlisted import run as ingest_unlisted_run
+
+    csv_path = Path(targets_csv)
+    print(f"\n═══ 7. 비상장 재무(DART) 보강 ═══")
+    if not csv_path.exists():
+        xp = Path(xlsx).expanduser()
+        if not xp.exists():
+            print(f"⚠️  비상장 명단 없음(targets.csv·xlsx 둘 다 없음) → 비상장 보강 스킵")
+            return
+        print(f"  targets.csv 없음 → 엑셀에서 corp_code 해석: {xp}")
+        resolve(str(xp))
+    ingest_unlisted_run(years, targets_csv=str(csv_path))
 
 
 def _run_compute():
     from app.compute import compute
 
-    print("\n═══ 7. 서비스 테이블 계산 ═══")
+    print("\n═══ 8. 서비스 테이블 계산(상장+비상장 재무 포함) ═══")
     compute()
 
 
@@ -214,6 +236,10 @@ def init_db(
     min_subscribers: int = 5,
     dart_folder: str = "data/dart",
     empsttus_years: list[int] | None = None,
+    unlisted_targets: str = "data/dart/unlisted_targets.csv",
+    unlisted_xlsx: str = "~/Downloads/top_1000_unlisted_comprehensive.xlsx",
+    unlisted_years: list[int] | None = None,
+    skip_unlisted: bool = False,
     force: bool = False,
     skip_cache: bool = False,
 ):
@@ -223,6 +249,8 @@ def init_db(
 
     if empsttus_years is None:
         empsttus_years = [2021, 2022, 2023, 2024]
+    if unlisted_years is None:
+        unlisted_years = [2021, 2022, 2023, 2024]
 
     # 이미 세팅된 DB 감지 (force 없을 때). DB 없으면 내부에서 pass
     _refuse_if_already_setup(force)
@@ -231,14 +259,16 @@ def init_db(
     _run_alembic()
     _grant_privileges()
 
+    # ── 원천(raw) 적재: 전부 compute 前 (compute 가 dart_finance_raw 를 읽어 company_finance 생성) ──
     _ingest_nps(nps_dir, min_subscribers)
     _ingest_dart_map(settings.dart_api_key, skip_cache)
     _ingest_empsttus(settings.dart_api_key, empsttus_years, skip_cache)
+    _ingest_finance_raw(dart_folder)                       # 상장 재무 → dart_finance_raw
+    if not skip_unlisted:
+        _ingest_unlisted(unlisted_targets, unlisted_xlsx, unlisted_years)  # 비상장 재무 → dart_raw + dart_finance_raw
+    # ── 매칭 → 서빙 계산(상장+비상장 재무·summary.revenue 모두 compute 가 소유) ──
     _run_match()
-    # compute 가 companies/company_summary 를 TRUNCATE + 재생성하므로
-    # 재무 적재는 반드시 compute 이후에 실행해야 함 (summary.revenue 업데이트)
     _run_compute()
-    _ingest_finance(dart_folder)
     _seed_net_pay()
 
     print("\n═══ ✅ 초기 세팅 완료 ═══")
@@ -262,6 +292,14 @@ def main():
         default="2021,2022,2023,2024",
         help="쉼표 구분 연도",
     )
+    parser.add_argument("--unlisted-targets", type=str, default="data/dart/unlisted_targets.csv",
+                        help="비상장 corp_code 명단 CSV (있으면 재사용)")
+    parser.add_argument("--unlisted-xlsx", type=str,
+                        default="~/Downloads/top_1000_unlisted_comprehensive.xlsx",
+                        help="명단 CSV 없을 때 이름목록 해석용 엑셀(재무는 안 씀, 이름만)")
+    parser.add_argument("--unlisted-years", type=str, default="2021,2022,2023,2024",
+                        help="비상장 재무 수집 연도(쉼표 구분)")
+    parser.add_argument("--skip-unlisted", action="store_true", help="비상장 보강 단계 건너뜀")
     parser.add_argument("--force", action="store_true", help="기존 DB 드롭 후 재생성")
     parser.add_argument(
         "--skip-cache",
@@ -271,11 +309,16 @@ def main():
     args = parser.parse_args()
 
     years = [int(y.strip()) for y in args.empsttus_years.split(",")]
+    uyears = [int(y.strip()) for y in args.unlisted_years.split(",")]
     init_db(
         nps_dir=args.nps_dir,
         min_subscribers=args.min_subscribers,
         dart_folder=args.dart_folder,
         empsttus_years=years,
+        unlisted_targets=args.unlisted_targets,
+        unlisted_xlsx=args.unlisted_xlsx,
+        unlisted_years=uyears,
+        skip_unlisted=args.skip_unlisted,
         force=args.force,
         skip_cache=args.skip_cache,
     )

@@ -33,14 +33,16 @@ def yearly(year: int, finance_folder: str | None = None):
 
     folder_path = Path(finance_folder)
     if folder_path.exists():
-        print(f"\n💰 DART 손익계산서 {year} 적재 ({folder_path})...")
-        from app.ingest_dart import ingest_finance
-        ingest_finance(str(folder_path))
+        # 정식 경로: dart_finance_raw 에 적재 → compute 가 읽어 company_finance 생성.
+        # (옛 ingest_finance 는 company_finance 에 직접 썼다가 compute TRUNCATE 로 날아감)
+        print(f"\n💰 DART 손익계산서 {year} → dart_finance_raw ({folder_path})...")
+        from app.ingest_dart import ingest_finance_raw
+        ingest_finance_raw(str(folder_path))
     else:
         print(f"\n⚠️  손익계산서 폴더 없음: {folder_path}")
         print("   수동 다운로드 후 --finance-folder 로 다시 실행하거나 스킵")
 
-    # 3. 서비스 테이블 재계산
+    # 3. 서비스 테이블 재계산 (company_finance·summary.revenue 모두 compute 가 소유)
     print("\n⚙️  compute 재실행...")
     from app.compute import compute
     compute()
