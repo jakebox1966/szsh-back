@@ -44,6 +44,10 @@ class User(Base):
     # 검색 일일 한도(회원). 비회원은 프론트 localStorage 가 담당. reset_at(KST 날짜) 바뀌면 0으로.
     search_calls_today = Column(Integer, default=0, nullable=False)
     search_calls_reset_at = Column(Date, nullable=True)
+    # 상세페이지 일일 조회 한도(회원). 비회원은 프론트 localStorage 가 담당. reset_at(KST 날짜) 바뀌면 비움.
+    # ※ 검색이 아니라 "회사 상세 진입" 시점에 차감. 같은 회사는 하루 1번만(슬러그 집합) — 새로고침/재진입 무차감.
+    detail_view_slugs = Column(ARRAY(String), nullable=False, server_default="{}")
+    detail_views_reset_at = Column(Date, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_active_at = Column(DateTime, default=datetime.utcnow, nullable=False)

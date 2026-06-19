@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -7,13 +7,21 @@ from sqlalchemy.orm import Session, selectinload
 from app.database import get_db
 from app.industry_groups import classify_industry
 from app.models import Company, CompanyComment, User
-from app.routers.auth import get_current_user
+from app.routers.auth import get_current_user, get_current_user_optional
 from app.schemas import (
     CompanyListItem, CompanyDetailOut, CompanyInfoOut, IndustryGroupOut, SummaryOut,
     CommentOut, CommentCreate, CommentUpdate, HROut, HRTrendOut, FinanceOut,
 )
 
 router = APIRouter(prefix="/api/companies", tags=["companies"])
+
+# tier 별 상세페이지 일일 조회 한도. premium 은 무제한(None). 모르는 tier 는 free 취급.
+DETAIL_VIEW_DAILY_LIMITS: dict[str, int | None] = {"free": 20, "premium": None}
+
+
+def _kst_today():
+    """KST(UTC+9) 기준 오늘 날짜. 백엔드 시간은 naive UTC 저장 → +9h 후 .date()."""
+    return (datetime.utcnow() + timedelta(hours=9)).date()
 
 
 def _format_history(founded_year: int | None) -> str | None:
@@ -70,8 +78,36 @@ def search_companies(q: str = Query("", description="Search keyword"), db: Sessi
     return run_company_search(q, db)
 
 
+@router.get("/view-quota")
+def view_quota(user: User | None = Depends(get_current_user_optional)):
+    """상세페이지 일일 조회 사용량(표시용, 소비 없음).
+    - 비회원: 서버 카운터 없음(프론트 localStorage 가 관리) → authenticated=False.
+    - 회원: tier 한도 기준 used/limit/remaining. reset_at 이 오늘과 다르면 used=0(쓰지 않음).
+    - premium(한도 None): unlimited=True.
+    ※ /{slug} 보다 먼저 선언해야 slug 로 안 잡힌다.
+    """
+    if user is None:
+        return {"authenticated": False, "unlimited": False, "limit": None, "used": None, "remaining": None}
+    limit = DETAIL_VIEW_DAILY_LIMITS.get(user.tier, 20)
+    if limit is None:
+        return {"authenticated": True, "tier": user.tier, "unlimited": True, "limit": None, "used": 0, "remaining": None}
+    used = len(user.detail_view_slugs or []) if user.detail_views_reset_at == _kst_today() else 0
+    return {
+        "authenticated": True,
+        "tier": user.tier,
+        "unlimited": False,
+        "limit": limit,
+        "used": used,
+        "remaining": max(0, limit - used),
+    }
+
+
 @router.get("/{slug}", response_model=CompanyDetailOut)
-def get_company(slug: str, db: Session = Depends(get_db)):
+def get_company(
+    slug: str,
+    user: User | None = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
     # selectinload: 각 관계를 별도 IN 쿼리로 분리해서 join row 폭발 방지.
     # 1:1 (summary, hr) 도 selectinload 가 동일 성능이라 통일 — 댓글이 늘어도
     # finance_history × hr_trends × comments 카테시안 곱 위험 없음.
@@ -90,6 +126,26 @@ def get_company(slug: str, db: Session = Depends(get_db)):
     )
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
+
+    # 회원 일일 조회 한도 차감(우회 불가). 비회원은 User row 가 없으니 프론트 localStorage 담당.
+    # ※ "회사 상세 진입" 시점에 차감하되, 같은 회사는 하루 1번만(슬러그 집합) — 새로고침/재진입/중복요청 무차감.
+    if user is not None:
+        limit = DETAIL_VIEW_DAILY_LIMITS.get(user.tier, 20)
+        if limit is not None:  # None = 무제한(premium)
+            today = _kst_today()
+            if user.detail_views_reset_at != today:  # 날짜 바뀌면 비움
+                user.detail_view_slugs = []
+                user.detail_views_reset_at = today
+            seen = user.detail_view_slugs or []
+            if slug not in seen:  # 처음 보는 회사만 차감
+                if len(seen) >= limit:
+                    db.commit()  # 리셋만이라도 반영
+                    raise HTTPException(
+                        status_code=429,
+                        detail={"reason": "free", "limit": limit, "used": len(seen)},
+                    )
+                user.detail_view_slugs = seen + [slug]  # 재할당해야 SQLAlchemy 가 변경 감지
+                db.commit()
 
     group = classify_industry(company.industry)
     info = CompanyInfoOut(
