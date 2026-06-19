@@ -138,6 +138,20 @@ def _label(cell):
     return re.sub(r"^[ⅠⅡⅢⅣⅤⅥ\d\.\s]+", "", cell)
 
 
+def _signed_amt(rc, lab):
+    """금액 추출 + 손실 라벨 부호 보정.
+    '영업손실'·'당기순손실'처럼 손실 전용 행은 괄호/△ 없이 양수 magnitude 로만 적히는
+    감사보고서가 있어(예: 당근마켓 FY2022) 음수로 보정한다.
+    '영업이익(손실)' 처럼 이익/손실 병기 라벨은 숫자 표기(괄호/△)에 맡긴다.
+    """
+    v = _first_amt(rc)
+    if v is None:
+        return None
+    if "손실" in lab and "이익" not in lab:
+        return -abs(v)
+    return v
+
+
 def _parse_audit_doc(text: str):
     """감사보고서 문서(HTML형 표)에서 손익계산서 매출/영업이익/당기순이익 추출.
     단일표(무신사)·페이지분할표(배민) 모두 대응: 매출 행을 가진 표부터 이어지는 표까지 본다.
@@ -160,9 +174,9 @@ def _parse_audit_doc(text: str):
             if rev is None and _REV.search(lab) and "외" not in lab:
                 rev = _first_amt(rc)
             if op is None and _OP.search(lab):
-                op = _first_amt(rc)
+                op = _signed_amt(rc, lab)
             if np is None and _NP.search(lab):
-                np = _first_amt(rc)
+                np = _signed_amt(rc, lab)
         if rev is None:
             continue  # 손익계산서 표 아님
         j = i + 1
@@ -172,9 +186,9 @@ def _parse_audit_doc(text: str):
                     continue
                 lab = _label(rc[0])
                 if op is None and _OP.search(lab):
-                    op = _first_amt(rc)
+                    op = _signed_amt(rc, lab)
                 if np is None and _NP.search(lab):
-                    np = _first_amt(rc)
+                    np = _signed_amt(rc, lab)
             j += 1
         if op is not None or np is not None:
             return {
@@ -194,7 +208,9 @@ def _audit_reports(cc: str, years: list[int]):
         j = _get(f"{BASE}/list.json", {"corp_code": cc, "bgn_de": f"{y + 1}0101",
                                        "end_de": f"{y + 1}0930", "page_count": "100"})
         items = j.get("list", []) if j.get("status") == "000" else []
-        for prefer in ("연결감사보고서", "감사보고서"):
+        # 사업보고서 우선 — 감사보고서만 내다가 성장하며 사업보고서 제출사로 전환한 회사
+        # (예: 당근마켓 FY2024~)는 fnlttSinglAcntAll API 가 013 이라 사업보고서 문서로만 잡힌다.
+        for prefer in ("사업보고서", "연결감사보고서", "감사보고서"):
             hit = next(
                 (it["rcept_no"] for it in items
                  if it.get("report_nm", "").startswith(prefer) and f"({y}." in it.get("report_nm", "")),
@@ -208,19 +224,41 @@ def _audit_reports(cc: str, years: list[int]):
 
 
 def _fetch_audit_finance(cc: str, years: list[int]):
-    """{bsns_year: {account_id: amount}} — 감사보고서 파싱 결과."""
+    """{bsns_year: {account_id: amount}} — 감사보고서/사업보고서 문서 파싱 결과.
+    사업보고서 ZIP 은 연결·별도·본문 여러 문서로 쪼개짐 → 각 문서 파싱해 가장 완전한
+    손익계산서 채택. 우선순위: 완전성(매출+영업+순익 다 있음) > 본문아님 > 연결.
+    """
     out: dict[int, dict] = {}
     for y, rcept in _audit_reports(cc, years).items():
         try:
             r = requests.get(f"{BASE}/document.xml",
-                             params={"crtfc_key": settings.dart_api_key, "rcept_no": rcept}, timeout=40)
+                             params={"crtfc_key": settings.dart_api_key, "rcept_no": rcept}, timeout=60)
             zf = zipfile.ZipFile(io.BytesIO(r.content))
-            doc = zf.read(zf.namelist()[0]).decode("utf-8", "replace")
         except (zipfile.BadZipFile, requests.RequestException):
             continue
-        parsed = _parse_audit_doc(doc)
-        if parsed and parsed.get("ifrs-full_Revenue"):
-            out[y] = parsed
+        best = None  # (rank, parsed)
+        for name in zf.namelist():
+            try:
+                doc = zf.read(name).decode("utf-8", "replace")
+            except Exception:
+                continue
+            parsed = _parse_audit_doc(doc)
+            if not parsed or not parsed.get("ifrs-full_Revenue"):
+                continue
+            completeness = sum(
+                parsed.get(k) is not None
+                for k in ("ifrs-full_Revenue", "dart_OperatingIncomeLoss", "ifrs-full_ProfitLoss")
+            )
+            is_main = name == f"{rcept}.xml"          # 사업보고서 본문(요약재무 섞임) → 후순위
+            # 연/별도 둘 다 있으면 별도 우선 — 기존 감사보고서 데이터·상장 bulk 가 별도 기준이라
+            # 일관성 유지(연결만 쓰면 해외 자회사 손익이 섞여 연도 간 기준 불일치). 연결 문서는
+            # '연결' 토큰이 훨씬 많음(당근 FY2025: 별도 1 vs 연결 37) → 적은 쪽을 별도로 본다.
+            consol_count = doc.count("연결")
+            rank = (completeness, not is_main, -consol_count)
+            if best is None or rank > best[0]:
+                best = (rank, parsed)
+        if best:
+            out[y] = best[1]
         time.sleep(0.1)
     return out
 
@@ -305,6 +343,18 @@ def run(years: list[int], names: list[str] | None = None,
                         amt = _won(it.get("thstrm_amount"))
                         if amt is not None:
                             seen[aid] = (it.get("account_nm"), amt, _won(it.get("frmtrm_amount")))
+                # 매출(영업수익)을 비표준 코드(ifrs-full_GrossProfit 등)로 태깅한 회사
+                # (크립토·금융 등, 예: 두나무) 구제 — 표준 매출 코드 없을 때 손익계산서 라인명으로 보강.
+                if "ifrs-full_Revenue" not in seen:
+                    for it in items:
+                        if it.get("sj_div") not in ("CIS", "IS"):
+                            continue
+                        nm = (it.get("account_nm") or "").replace(" ", "")
+                        if nm in ("영업수익", "매출액", "매출"):
+                            amt = _won(it.get("thstrm_amount"))
+                            if amt is not None:
+                                seen["ifrs-full_Revenue"] = (it.get("account_nm"), amt, _won(it.get("frmtrm_amount")))
+                                break
                 stmt_type = "포괄손익계산서 - 연결" if fs == "CFS" else "포괄손익계산서 - 별도"
                 for aid, (anm, cur, prev) in seen.items():
                     ex = (
