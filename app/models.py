@@ -273,7 +273,7 @@ class CompanyComment(Base):
     __tablename__ = "company_comments"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     content = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -298,7 +298,7 @@ class CompanyHRTrend(Base):
     __tablename__ = "company_hr_trends"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     year_month = Column(Date, nullable=False)                 # 월별 시점 (정렬/계산 가능)
     in_count = Column(Integer)
     out_count = Column(Integer)
@@ -311,7 +311,7 @@ class CompanyFinance(Base):
     __tablename__ = "company_finance"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     revenue_current = Column(BigInteger)                       # 원
     revenue_growth = Column(Numeric(10, 2))                    # %.
     operating_profit_current = Column(BigInteger)              # 원
@@ -327,7 +327,7 @@ class CompanyFinanceHistory(Base):
     __tablename__ = "company_finance_history"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     year = Column(String)
     rev = Column(BigInteger)                                   # 원
     profit = Column(BigInteger)                                # 원
@@ -350,7 +350,7 @@ class EmployeeGrowth(Base):
     name = Column(String)
     count = Column(Integer)
     growth = Column(Numeric(10, 2))                            # %. 캡 해제
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
 
     company = relationship("Company")
 
